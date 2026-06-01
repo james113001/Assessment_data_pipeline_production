@@ -1,0 +1,8 @@
+services:
+  pipeline:
+    build: .
+    volumes:
+      - ${DATA_DIR:-./data}:/app/data
+      - ${CONTRACT_PATH:-./Contract_rules.yaml}:/app/Contract_rules.yaml
+    environment:
+      - SPARK_SHUFFLE_PARTITIONS=${SPARK_SHUFFLE_PARTITIONS:-4}

@@ -1,0 +1,46 @@
+dataset: payments
+version: 1.0
+
+schema:
+  - name: record_id
+    type: string
+    required: true
+    unique_within_file: true
+  - name: event_ts
+    type: timestamp
+    required: true
+  - name: business_date
+    type: date
+    required: true
+  - name: source_system
+    type: string
+    required: true
+    allowed_values: [CARD_PROC, ACH_GATEWAY, WIRE_HUB, WALLET_X]
+  - name: currency
+    type: string
+    required: true
+    allowed_values: [USD, EUR, GBP]
+  - name: amount
+    type: decimal(18,2)
+    required: true
+    min_value: 0
+  - name: status
+    type: string
+    required: true
+    allowed_values: [NEW, POSTED, SETTLED, FAILED, REVERSED]
+  - name: merchant_category
+    type: string
+    required: false
+  - name: country_code
+    type: string
+    required: true
+    regex: "^[A-Z]{2}$"
+
+business_rules:
+  - name: settled_amount_positive
+    condition: "status == 'SETTLED'"
+    assert: "amount > 0"
+  - name: event_ts_near_business_date
+    assert: "abs(datediff(to_date(event_ts), business_date)) <= 7"
+  - name: business_date_not_far_future
+    assert: "business_date <= current_date + interval 1 day"
