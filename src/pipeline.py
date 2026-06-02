@@ -112,55 +112,6 @@ def build_spark_session(app_name: str = "DataContractValidation") -> SparkSessio
     )
 
 
-# Bronze layer - raw ingestion
-
-def ingest_bronze(spark: SparkSession, input_dir: str) -> "DataFrame":
-    """
-    Read ALL CSV files in input_dir into a single DataFrame.
-
-    Bronze = raw data exactly as received.  We make zero semantic changes
-    here - every byte is preserved so we can always reprocess from this layer
-    if a bug is found in later logic.
-
-    Additions (metadata only, not source data):
-      _source_file  - which file this row came from (for auditability)
-      _ingested_at  - pipeline run timestamp (for lineage)
-      _raw_row      - full original row as a string (for the quarantine log)
-    """
-    log.info("BRONZE - reading CSVs from %s", input_dir)
-
-    # multiLine=False and sep="," are explicit defaults - being explicit makes
-    # the intent clear to the next engineer who reads this.
-    #
-    # IMPORTANT: inferSchema=False keeps everything as StringType at this stage.
-    # We intentionally do NOT coerce types in bronze - bad values like
-    # "2026/05/21 10:99:11" or "1,234.56" would either fail or silently become
-    # null if we let Spark infer types here.  Type validation is the validator's
-    # job, not the ingestion layer's.
-    df = (
-        spark.read
-        .option("header", "true")
-        .option("inferSchema", "false")   # keep everything as string
-        .option("mode", "PERMISSIVE")     # don't crash on malformed rows
-        .option("columnNameOfCorruptRecord", "_corrupt_record")
-        .csv(input_dir)
-    )
-
-    # Attach metadata columns so every downstream layer can trace each record
-    # back to its origin without reading the raw files again.
-    df = (
-        df
-        .withColumn("_source_file",
-                    F.regexp_extract(F.input_file_name(), r"([^/]+)$", 1))
-        .withColumn("_ingested_at",
-                    F.lit(datetime.utcnow().isoformat()))
-    )
-
-    row_count = df.count()
-    log.info("BRONZE - ingested %d rows from %s", row_count, input_dir)
-    return df
-
-
 # Pre-processing - normalise delimiter chaos before validation
 def normalise_delimiters(spark: SparkSession, input_path: "str | list[str]") -> DataFrame:
     """
@@ -455,6 +406,10 @@ def run(
     spark = build_spark_session()
     spark.sparkContext.setLogLevel("WARN")
 
+    # Normalise empty strings from shell to None so date logic is unambiguous
+    start_date = start_date or None
+    end_date   = end_date   or None
+
     input_path = (
         _filter_input_paths(input_dir, start_date, end_date)
         if start_date or end_date
@@ -494,7 +449,7 @@ def run(
     # ── Stage 3: Write outputs ───────────────────────────────────────────────
     # All three writes are independent - a failure in report generation does
     # NOT roll back silver or quarantine.  In production you would wrap these
-    # in a transaction or use Delta Lake's ACID guarantees.
+    # in a Databricks Delta Lake ACID transaction
     t = time.perf_counter()
     write_silver(df_validated, output_dir)
     log.info("SILVER write complete in %.2fs", time.perf_counter() - t)
@@ -507,6 +462,7 @@ def run(
     write_report(df_validated, output_dir)
     log.info("REPORT write complete in %.2fs", time.perf_counter() - t)
 
+    df_validated.unpersist()
     log.info("Pipeline complete in %.2fs. Outputs at: %s",
              time.perf_counter() - pipeline_start, output_dir)
     spark.stop()
