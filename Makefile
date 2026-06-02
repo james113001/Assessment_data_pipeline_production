@@ -14,7 +14,7 @@ docker-build:
 	docker compose build
 
 docker-run:
-	docker compose up
+	docker compose up --build
 
 clean:
 	rm -rf data/output
