@@ -1,6 +1,6 @@
 """
-Unit Tests – Data Contract Validation Pipeline
-===============================================
+Unit Tests - Data Contract Validation Pipeline
+
 Tests cover the rule engine in isolation (no file I/O needed) using
 small in-memory DataFrames.  Each test class targets one rule category.
 
@@ -21,9 +21,8 @@ from pyspark.sql.types import StructType, StructField, StringType, BooleanType
 from validator import ContractValidator
 
 
-# ---------------------------------------------------------------------------
+
 # Shared Spark session
-# ---------------------------------------------------------------------------
 
 @pytest.fixture(scope="session")
 def spark():
@@ -50,9 +49,9 @@ def validator(contract_path):
     return ContractValidator(contract_path)
 
 
-# ---------------------------------------------------------------------------
+
 # Helper — explicit schema so None values work correctly in Spark 4
-# ---------------------------------------------------------------------------
+
 
 # All source columns are StringType (mirrors how CSV ingestion works).
 # _delimiter_issue is BooleanType because it's set by the pipeline, not CSV.
@@ -99,9 +98,9 @@ def make_valid_row(spark, overrides: dict = None):
     return spark.createDataFrame([row_tuple], schema=ROW_SCHEMA)
 
 
-# ---------------------------------------------------------------------------
+
 # Test: required fields
-# ---------------------------------------------------------------------------
+
 
 class TestRequiredFields:
 
@@ -131,9 +130,9 @@ class TestRequiredFields:
         assert result["is_valid"] is False
 
 
-# ---------------------------------------------------------------------------
+
 # Test: allowed values
-# ---------------------------------------------------------------------------
+
 
 class TestAllowedValues:
 
@@ -167,9 +166,9 @@ class TestAllowedValues:
             assert result["is_valid"] is True, f"{system} should be valid"
 
 
-# ---------------------------------------------------------------------------
+
 # Test: type validation
-# ---------------------------------------------------------------------------
+
 
 class TestTypeValidation:
 
@@ -193,14 +192,14 @@ class TestTypeValidation:
         assert result["is_valid"] is True
 
 
-# ---------------------------------------------------------------------------
+
 # Test: regex validation
-# ---------------------------------------------------------------------------
+
 
 class TestRegexValidation:
 
     def test_three_letter_country_code_fails(self, spark, validator):
-        """'USA' is 3 characters – contract requires exactly 2 uppercase letters."""
+        """'USA' is 3 characters - contract requires exactly 2 uppercase letters."""
         df = make_valid_row(spark, {"country_code": "USA"})
         result = validator.apply(df).collect()[0]
         assert result["is_valid"] is False
@@ -218,9 +217,9 @@ class TestRegexValidation:
             assert result["is_valid"] is True, f"{code} should be valid"
 
 
-# ---------------------------------------------------------------------------
+
 # Test: range validation
-# ---------------------------------------------------------------------------
+
 
 class TestRangeValidation:
 
@@ -237,9 +236,9 @@ class TestRangeValidation:
         assert result["is_valid"] is True
 
 
-# ---------------------------------------------------------------------------
+
 # Test: business rules
-# ---------------------------------------------------------------------------
+
 
 class TestBusinessRules:
 
@@ -280,9 +279,9 @@ class TestBusinessRules:
         assert "business_date_not_far_future" in result["rejection_reasons"]
 
 
-# ---------------------------------------------------------------------------
+
 # Test: duplicate detection
-# ---------------------------------------------------------------------------
+
 
 class TestDuplicateDetection:
 

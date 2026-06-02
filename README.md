@@ -14,21 +14,62 @@ Bronze handles delimiter normalisation (some input rows use `|` or `;` instead o
 
 All rules live in `Contract_rules.yaml`. Adding an allowed value or tweaking a regex is a config change, not a deployment.
 
+## Quick start (sample data)
+
+**Docker (recommended — no local Java or Python setup required):**
+```bash
+make docker-run
+```
+
+**Local — Mac/Linux** (requires Python 3.11+, Java 17+):
+```bash
+pip install -r requirements.txt
+make run
+```
+
+**Local — Windows:** Use Docker above, or run inside WSL (Windows Subsystem for Linux) with the Mac/Linux instructions.
+
+**Tests:**
+```bash
+make test
+```
+
 ## Running with your own data
 
-Pass your input directory, output directory, and contract path as arguments:
-
+**Local:**
 ```bash
 bash run.sh /path/to/your/input /path/to/output /path/to/Contract_rules.yaml
 ```
 
-With Docker Compose, set env vars — no file editing needed:
-
+**Docker Compose** (set env vars — no file editing needed):
 ```bash
 DATA_DIR=/path/to/your/data \
 CONTRACT_PATH=/path/to/your/contract.yaml \
 docker compose up
 ```
+
+## Backfilling a date range
+
+Pass `start_date` and `end_date` (YYYY-MM-DD) to process only files whose names contain a matching date. Omit both to process everything in the input directory.
+
+**Local:**
+```bash
+bash run.sh data/input data/output Contract_rules.yaml 2026-05-20 2026-05-21
+```
+
+**Docker:**
+```bash
+docker compose run --rm pipeline bash run.sh \
+  /app/data/input /app/data/output /app/Contract_rules.yaml \
+  2026-05-20 2026-05-21
+```
+
+## Observability
+
+The pipeline logs row counts and duration at every stage. Two silent-failure checks run on every execution:
+
+- **Empty input guard** — exits with a non-zero code if no rows are ingested, so orchestrators register it as a failure rather than silently writing empty outputs
+- **Schema drift detection** — compares actual input columns against the contract after ingestion; logs a warning for unexpected columns and an error for missing ones
 
 ## Tuning for larger datasets
 
@@ -38,30 +79,9 @@ Shuffle partitions default to `4` (appropriate for the sample data). Set `SPARK_
 SPARK_SHUFFLE_PARTITIONS=200 bash run.sh
 ```
 
-Or with Docker:
-
+Or with Docker Compose:
 ```bash
-docker run --rm -e SPARK_SHUFFLE_PARTITIONS=200 \
-  -v /path/to/your/data:/app/data \
-  jpm-pipeline
-```
-
-## Quick start (sample data)
-
-**Docker:**
-```bash
-make docker-run
-```
-
-**Local** (requires Python 3.11+, Java 17+):
-```bash
-pip install -r requirements.txt
-make run
-```
-
-**Tests:**
-```bash
-make test
+SPARK_SHUFFLE_PARTITIONS=200 docker compose up
 ```
 
 ## Structure

@@ -1,27 +1,30 @@
 """
-Contract Validator
-==================
+Contract Validator (Step 1)
+
 Reads the data contract YAML and translates every rule into a PySpark
 Column expression.  The pipeline calls `ContractValidator.apply(df)` and
 gets back the same DataFrame with two new columns:
 
-  is_valid          – True only if every rule passed
-  rejection_reasons – pipe-delimited string of every failure message
+  is_valid          - True only if every rule passed
+  rejection_reasons - pipe-delimited string of every failure message
                       (empty string for valid rows)
 
 Why this design?
   - Config-driven: adding a new allowed value or changing a regex requires
     only a YAML edit, not a code change + deployment.
-  - Vectorised: all checks run as Spark column expressions – no Python UDFs,
+  - Vectorised: all checks run as Spark column expressions - no Python UDFs,
     no row-by-row loops.  Spark can optimise and parallelise everything.
   - Transparent: each violation produces a human-readable message that goes
     directly into the quarantine and report outputs.
 """
 
+import logging
 import re
 from typing import Any
 
 import yaml
+
+log = logging.getLogger(__name__)
 from pyspark.sql import DataFrame
 from pyspark.sql import functions as F
 from pyspark.sql.types import BooleanType, DecimalType, StringType
@@ -35,7 +38,7 @@ class ContractValidator:
 
     def __init__(self, contract_path: str) -> None:
         """
-        Parse the YAML contract on construction so any config errors surface
+        Parse the YAML contract on construction so any config errors present
         immediately rather than at runtime when processing millions of rows.
         """
         with open(contract_path, "r") as fh:
@@ -50,9 +53,8 @@ class ContractValidator:
 
         self._business_rules: list[dict] = self._contract.get("business_rules", [])
 
-    # -------------------------------------------------------------------------
+    
     # Public API
-    # -------------------------------------------------------------------------
 
     def apply(self, df: DataFrame) -> DataFrame:
         """
@@ -60,7 +62,7 @@ class ContractValidator:
 
         Returns `df` with two additional columns:
           is_valid          (BooleanType)
-          rejection_reasons (StringType)  – pipe-delimited violation messages
+          rejection_reasons (StringType)  - pipe-delimited violation messages
         """
         # Collect every (violation_message_column) expression we're going to
         # evaluate.  Each returns either a string message (if the check failed)
@@ -100,11 +102,10 @@ class ContractValidator:
 
         return df
 
-    # -------------------------------------------------------------------------
+    
     # Schema rule builders
     # Each method returns a list of Column expressions (one per column/rule).
-    # -------------------------------------------------------------------------
-
+    
     def _required_checks(self) -> list:
         """
         For every column marked required:true, return a Column expression that
@@ -137,7 +138,7 @@ class ContractValidator:
         We do NOT normalise case before comparison.  The contract specifies
         exact allowed values (e.g. 'SETTLED') and the source system is
         expected to send them in that exact case.  Lowercase variants like
-        'settled' or 'card_proc' are genuine data quality violations – they
+        'settled' or 'card_proc' are genuine data quality violations - they
         indicate a source system bug that the owning team needs to fix.
 
         Note: we skip the check if the value is null (caught by required check).
@@ -167,13 +168,13 @@ class ContractValidator:
         """
         Validate that column values can actually be parsed as their declared type.
 
-        We do NOT cast the column – we only check castability.  This keeps bronze
+        We do NOT cast the column - we only check castability.  This keeps bronze
         values intact (we never silently coerce bad data).
 
         Types handled:
-          timestamp – ISO-8601 or parseable datetime string
-          date      – parseable date string
-          decimal   – numeric, no comma-formatting, within precision/scale
+          timestamp - ISO-8601 or parseable datetime string
+          date      - parseable date string
+          decimal   - numeric, no comma-formatting, within precision/scale
         """
         exprs = []
         for col_name, rules in self._schema.items():
@@ -211,7 +212,7 @@ class ContractValidator:
                 )
 
             elif declared_type.startswith("decimal"):
-                # Reject values that contain commas (e.g. "1,234.56") –
+                # Reject values that contain commas (e.g. "1,234.56") -
                 # these are formatting artefacts from Excel exports that would
                 # silently become null on cast in some systems.
                 # Use try_cast via expr() to avoid ANSI-mode exceptions on
@@ -246,7 +247,7 @@ class ContractValidator:
             if not pattern:
                 continue
 
-            # Validate the pattern is legal Python regex (catches config typos)
+            # Validate the pattern is legal Python regex (catches config typos), fail fast
             try:
                 re.compile(pattern)
             except re.error as exc:
@@ -314,18 +315,18 @@ class ContractValidator:
 
         return exprs
 
-    # -------------------------------------------------------------------------
+    
     # Business rules
-    # -------------------------------------------------------------------------
+    
 
     def _business_rule_checks(self, df: DataFrame) -> list:
         """
         Translate the business_rules section of the YAML into Column expressions.
 
         Each business rule has:
-          name      – identifier used in violation messages
-          condition – optional precondition (rule only applies when this is true)
-          assert    – the expression that must be true for valid rows
+          name      - identifier used in violation messages
+          condition - optional precondition (rule only applies when this is true)
+          assert    - the expression that must be true for valid rows
 
         We evaluate each rule as a Spark SQL expression string using expr().
         This lets the YAML author write natural SQL-like conditions without
@@ -374,7 +375,7 @@ class ContractValidator:
                 F.expr("try_cast(amount as decimal(18,2))").isNotNull() &
                 (F.expr("try_cast(amount as decimal(18,2))") <= 0),
                 F.lit(
-                    f"business_rule: {rule_name} – "
+                    f"business_rule: {rule_name} - "
                     "amount must be > 0 when status=SETTLED"
                 )
             ).otherwise(F.lit(None).cast(StringType()))
@@ -394,7 +395,7 @@ class ContractValidator:
                     ) > 7
                 ),
                 F.concat(
-                    F.lit(f"business_rule: {rule_name} – event_ts "),
+                    F.lit(f"business_rule: {rule_name} - event_ts "),
                     F.col("event_ts"),
                     F.lit(" is more than 7 days from business_date "),
                     F.col("business_date")
@@ -411,7 +412,7 @@ class ContractValidator:
                     F.date_add(F.current_date(), 1)
                 ),
                 F.concat(
-                    F.lit(f"business_rule: {rule_name} – business_date "),
+                    F.lit(f"business_rule: {rule_name} - business_date "),
                     F.col("business_date"),
                     F.lit(" is more than 1 day in the future")
                 )
@@ -435,24 +436,19 @@ class ContractValidator:
                         ~assert_col,
                         F.lit(f"business_rule: {rule_name} failed")
                     ).otherwise(F.lit(None).cast(StringType()))
-            except Exception:
-                # If the SQL expression can't be parsed, skip this rule but
-                # log a warning so it doesn't silently disappear.
-                import logging
-                logging.getLogger(__name__).warning(
-                    "Could not evaluate business rule '%s' – skipping", rule_name
-                )
+            except Exception as e:
+                log.warning("Could not evaluate business rule '%s' (%s) - skipping", rule_name, e)
                 return F.lit(None).cast(StringType())
 
-    # -------------------------------------------------------------------------
+    
     # Cross-file duplicate detection
-    # -------------------------------------------------------------------------
+    
 
     def _add_duplicate_flag(self, df: DataFrame) -> DataFrame:
         """
         Flag rows whose record_id appears more than once across ALL input files.
 
-        In the test data, R1003 appears in both the May-20 and May-21 files –
+        In the test data, R1003 appears in both the May-20 and May-21 files -
         this is a cross-file duplicate that a single-file uniqueness check
         would miss.
 
@@ -460,7 +456,7 @@ class ContractValidator:
         then mark any row where the count > 1 as a duplicate.
 
         Note: we trim the record_id to handle the 'R2007 ' (trailing space)
-        test case – that should match 'R2007' and both should be flagged.
+        test case - that should match 'R2007' and both should be flagged.
         """
         from pyspark.sql.window import Window
 
@@ -477,7 +473,7 @@ class ContractValidator:
             F.col("_record_id_count") > 1
         )
 
-        # Drop the helper columns – they've served their purpose
+        # Drop the helper columns - they've served their purpose
         df = df.drop("_record_id_clean", "_record_id_count")
 
         return df

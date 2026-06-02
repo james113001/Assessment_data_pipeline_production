@@ -1,6 +1,6 @@
 """
 Data Contract Validation Pipeline
-==================================
+
 JPMC Data Engineer II Take-Home Assessment
 
 Architecture (medallion pattern):
@@ -25,20 +25,22 @@ Design principles applied:
 
 import logging
 import os
+import re
 import sys
-from datetime import datetime
+import time
+from datetime import date, datetime
 from pathlib import Path
 
-from pyspark.sql import SparkSession
+import yaml
+from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql import functions as F
 from pyspark.sql.types import StringType
 
-# Import our config-driven rule engine (defined in validator.py)
 from validator import ContractValidator
 
-# ---------------------------------------------------------------------------
+
 # Logging
-# ---------------------------------------------------------------------------
+
 # Using Python's standard logger so output is structured and easy to redirect
 # to a log aggregator (Splunk, CloudWatch, etc.) in production.
 logging.basicConfig(
@@ -49,9 +51,45 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 
-# ---------------------------------------------------------------------------
+def _filter_input_paths(input_dir: str, start_date: str, end_date: str) -> list[str]:
+    """Return only CSVs whose filename date falls within [start_date, end_date]."""
+    start = date.fromisoformat(start_date)
+    end   = date.fromisoformat(end_date)
+
+    matched = sorted(
+        str(p) for p in Path(input_dir).glob("*.csv")
+        if (m := re.search(r"(\d{4}-\d{2}-\d{2})", p.name))
+        and start <= date.fromisoformat(m.group(1)) <= end
+    )
+    log.info("DATE FILTER - %d file(s) matched [%s → %s]",
+             len(matched), start_date, end_date)
+    return matched
+
+
+def check_schema_drift(df: DataFrame, contract_path: str) -> None:
+    """
+    Compare actual DataFrame columns against the contract schema.
+    Missing columns are structural failures — a whole column being absent
+    means the source schema changed, not just a bad value.
+    """
+    with open(contract_path) as f:
+        contract = yaml.safe_load(f)
+
+    expected   = {c["name"] for c in contract.get("schema", [])}
+    actual     = {c for c in df.columns if not c.startswith("_")}
+    missing    = expected - actual
+    unexpected = actual - expected
+
+    if missing:
+        log.error("SCHEMA DRIFT - columns missing from input: %s", sorted(missing))
+    if unexpected:
+        log.warning("SCHEMA DRIFT - unexpected columns in input: %s", sorted(unexpected))
+    if not missing and not unexpected:
+        log.info("SCHEMA - no drift detected")
+
+
 # Spark session factory
-# ---------------------------------------------------------------------------
+
 def build_spark_session(app_name: str = "DataContractValidation") -> SparkSession:
     """
     Create (or reuse) a SparkSession configured for local execution.
@@ -74,9 +112,8 @@ def build_spark_session(app_name: str = "DataContractValidation") -> SparkSessio
     )
 
 
-# ---------------------------------------------------------------------------
 # Bronze layer - raw ingestion
-# ---------------------------------------------------------------------------
+
 def ingest_bronze(spark: SparkSession, input_dir: str) -> "DataFrame":
     """
     Read ALL CSV files in input_dir into a single DataFrame.
@@ -124,10 +161,8 @@ def ingest_bronze(spark: SparkSession, input_dir: str) -> "DataFrame":
     return df
 
 
-# ---------------------------------------------------------------------------
 # Pre-processing - normalise delimiter chaos before validation
-# ---------------------------------------------------------------------------
-def normalise_delimiters(spark: SparkSession, input_dir: str) -> "DataFrame":
+def normalise_delimiters(spark: SparkSession, input_path: "str | list[str]") -> DataFrame:
     """
     The test files contain rows with mixed delimiters (pipe | and semicolon ;).
     Spark's CSV reader splits on a single separator so those rows arrive as a
@@ -159,7 +194,7 @@ def normalise_delimiters(spark: SparkSession, input_dir: str) -> "DataFrame":
         .option("inferSchema", "false")
         .option("mode", "PERMISSIVE")
         .option("columnNameOfCorruptRecord", "_corrupt_record")
-        .csv(input_dir)
+        .csv(input_path)
     )
 
     # Tag the source file on every row for auditability
@@ -175,7 +210,7 @@ def normalise_delimiters(spark: SparkSession, input_dir: str) -> "DataFrame":
     df_text = (
         spark.read
         .option("header", "true")   # skip the header line
-        .text(input_dir)            # one column: "value"
+        .text(input_path)           # one column: "value"
         .withColumn("_source_file",
                     F.regexp_extract(F.input_file_name(), r"([^/]+)$", 1))
     )
@@ -228,9 +263,9 @@ def normalise_delimiters(spark: SparkSession, input_dir: str) -> "DataFrame":
     return df_unified
 
 
-# ---------------------------------------------------------------------------
+
 # Validation - tag every record with its violations
-# ---------------------------------------------------------------------------
+
 def validate(df: "DataFrame", contract_path: str) -> "DataFrame":
     """
     Apply all rules from the data contract YAML to every row.
@@ -257,9 +292,9 @@ def validate(df: "DataFrame", contract_path: str) -> "DataFrame":
     return df_validated
 
 
-# ---------------------------------------------------------------------------
+
 # Silver layer - clean records only
-# ---------------------------------------------------------------------------
+
 def write_silver(df: "DataFrame", output_dir: str) -> None:
     """
     Write only the records that passed ALL validation checks.
@@ -299,9 +334,9 @@ def write_silver(df: "DataFrame", output_dir: str) -> None:
     log.info("SILVER - wrote %d clean records", count)
 
 
-# ---------------------------------------------------------------------------
+
 # Quarantine layer - rejected records with reasons
-# ---------------------------------------------------------------------------
+
 def write_quarantine(df: "DataFrame", output_dir: str) -> None:
     """
     Write rejected records to the quarantine zone.
@@ -343,9 +378,9 @@ def write_quarantine(df: "DataFrame", output_dir: str) -> None:
     log.info("QUARANTINE - wrote %d rejected records", count)
 
 
-# ---------------------------------------------------------------------------
+
 # Validation report - human-readable audit log
-# ---------------------------------------------------------------------------
+
 def write_report(df: "DataFrame", output_dir: str) -> None:
     """
     Produce a flat CSV report: one row per violation per record.
@@ -388,10 +423,16 @@ def write_report(df: "DataFrame", output_dir: str) -> None:
     log.info("REPORT - %d violations across %d rejected records", count, count)
 
 
-# ---------------------------------------------------------------------------
-# Entrypoint
-# ---------------------------------------------------------------------------
-def run(input_dir: str, output_dir: str, contract_path: str) -> None:
+
+# Entrypoint=======================================================================
+
+def run(
+    input_dir: str,
+    output_dir: str,
+    contract_path: str,
+    start_date: str = None,
+    end_date: str = None,
+) -> None:
     """
     Orchestrate the full pipeline:
       normalise → bronze → validate → silver + quarantine + report
@@ -402,36 +443,72 @@ def run(input_dir: str, output_dir: str, contract_path: str) -> None:
       - Databricks notebook (%run or dbutils.notebook.run)
       - Unit tests (by passing in temp directories)
     """
-    log.info("=" * 60)
     log.info("Pipeline starting")
     log.info("  input_dir    : %s", input_dir)
     log.info("  output_dir   : %s", output_dir)
     log.info("  contract     : %s", contract_path)
-    log.info("=" * 60)
+    if start_date or end_date:
+        log.info("  date range   : %s → %s", start_date or "unbounded", end_date or "unbounded")
+
+    pipeline_start = time.perf_counter()
 
     spark = build_spark_session()
-    # Suppress verbose Spark/Hadoop log lines so our pipeline logs are readable
     spark.sparkContext.setLogLevel("WARN")
 
+    input_path = (
+        _filter_input_paths(input_dir, start_date, end_date)
+        if start_date or end_date
+        else input_dir
+    )
+    if isinstance(input_path, list) and not input_path:
+        log.error("DATE FILTER - no files found in range [%s, %s], aborting", start_date, end_date)
+        spark.stop()
+        sys.exit(1)
+
     # ── Stage 1: Bronze ──────────────────────────────────────────────────────
-    # Normalise delimiter issues THEN treat the result as our bronze layer.
-    # In a production system bronze would be written to persistent storage
-    # (Delta table / S3 prefix) before validation so you always have the
-    # raw data available for reprocessing.
-    df_bronze = normalise_delimiters(spark, input_dir)
+    # Strictly, bronze should be untouched raw data. The current implementation 
+    # makes a pragmatic trade-off — it normalises at ingestion so the structured 
+    # layer is usable, and flags rows that were modified. In a production Databricks 
+    # deployment, the raw files on object storage would be the true immutable bronze, 
+    # and normalisation would be a separate step before validation.
+    t = time.perf_counter()
+    df_bronze = normalise_delimiters(spark, input_path)
+    log.info("BRONZE complete in %.2fs", time.perf_counter() - t)
+
+    bronze_count = df_bronze.count()
+    if bronze_count == 0:
+        log.error("BRONZE - no rows ingested from %s, aborting", input_path)
+        spark.stop()
+        sys.exit(1)
+
+    check_schema_drift(df_bronze, contract_path)
 
     # ── Stage 2: Validate ────────────────────────────────────────────────────
+    t = time.perf_counter()
     df_validated = validate(df_bronze, contract_path)
+    # Cache so silver, quarantine, and report don't each retrigger the full
+    # validation DAG from scratch.
+    df_validated.cache()
+    log.info("VALIDATE complete in %.2fs", time.perf_counter() - t)
 
     # ── Stage 3: Write outputs ───────────────────────────────────────────────
     # All three writes are independent - a failure in report generation does
     # NOT roll back silver or quarantine.  In production you would wrap these
     # in a transaction or use Delta Lake's ACID guarantees.
+    t = time.perf_counter()
     write_silver(df_validated, output_dir)
-    write_quarantine(df_validated, output_dir)
-    write_report(df_validated, output_dir)
+    log.info("SILVER write complete in %.2fs", time.perf_counter() - t)
 
-    log.info("Pipeline complete. Outputs at: %s", output_dir)
+    t = time.perf_counter()
+    write_quarantine(df_validated, output_dir)
+    log.info("QUARANTINE write complete in %.2fs", time.perf_counter() - t)
+
+    t = time.perf_counter()
+    write_report(df_validated, output_dir)
+    log.info("REPORT write complete in %.2fs", time.perf_counter() - t)
+
+    log.info("Pipeline complete in %.2fs. Outputs at: %s",
+             time.perf_counter() - pipeline_start, output_dir)
     spark.stop()
 
 
@@ -440,8 +517,10 @@ if __name__ == "__main__":
     #   python pipeline.py ../../data/input ../../data/output ../../Contract_rules.yaml
     base = Path(__file__).parent.parent
 
-    _input    = sys.argv[1] if len(sys.argv) > 1 else str(base / "data/input")
-    _output   = sys.argv[2] if len(sys.argv) > 2 else str(base / "data/output")
-    _contract = sys.argv[3] if len(sys.argv) > 3 else str(base / "Contract_rules.yaml")
+    _input      = sys.argv[1] if len(sys.argv) > 1 else str(base / "data/input")
+    _output     = sys.argv[2] if len(sys.argv) > 2 else str(base / "data/output")
+    _contract   = sys.argv[3] if len(sys.argv) > 3 else str(base / "Contract_rules.yaml")
+    _start_date = sys.argv[4] if len(sys.argv) > 4 else None
+    _end_date   = sys.argv[5] if len(sys.argv) > 5 else None
 
-    run(_input, _output, _contract)
+    run(_input, _output, _contract, _start_date, _end_date)
