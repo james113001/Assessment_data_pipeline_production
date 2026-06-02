@@ -16,15 +16,15 @@ All rules live in `Contract_rules.yaml`. Adding an allowed value or tweaking a r
 
 ## Quick start (sample data)
 
-**Docker (recommended — no local Java or Python setup required):**
-```bash
-make docker-run
-```
-
-**Local — Mac/Linux** (requires Python 3.11+, Java 17+):
+**Local — Mac/Linux** (fastest if Python 3.11+, Java 17+, and PySpark are already installed):
 ```bash
 pip install -r requirements.txt
 make run
+```
+
+**Docker** (no local Java, Python, or PySpark setup required):
+```bash
+make docker-run
 ```
 
 **Local — Windows:** Use Docker above, or run inside WSL (Windows Subsystem for Linux) with the Mac/Linux instructions.
