@@ -8,7 +8,7 @@ run:
 	bash run.sh $(INPUT) $(OUTPUT) $(CONTRACT)
 
 test:
-	python -m pytest tests/ -v
+	python3 -m pytest tests/ -v
 
 docker-build:
 	docker compose build
